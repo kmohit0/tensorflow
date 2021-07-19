@@ -355,7 +355,8 @@ def deterministic_random_uniform(shape,
                              minval=0,
                              maxval=None,
                              dtype=dtypes.float32,
-                             name=None):
+                             name=None,
+                             alg="auto_select"):
 
   dtype = dtypes.as_dtype(dtype)
   if dtype not in (dtypes.float16, dtypes.bfloat16, dtypes.float32,
@@ -370,30 +371,36 @@ def deterministic_random_uniform(shape,
       raise ValueError("Invalid dtype for bounded uniform integers: %r" % dtype)
   elif maxval is None:
     maxval = 1
+
   seed=ops.get_default_graph().seed
-  # Logging information
-  #logging.info('Op seed is {}'.format(seed))
-  #logging_ops.print_v2('Op seed before split is',seed,output_stream=sys.stdout)
-  # updating the split of the seed
 
   ops.get_default_graph().seed = split(seed,num=1)[0,:]
 
-  #logging_ops.print_v2('Op seed after split is',ops.get_default_graph().seed,output_stream=sys.stdout)
   with ops.name_scope(name, "stateless_random_uniform",
-                      [shape,seed, minval, maxval]) as name:
+                      [shape, seed, minval, maxval]) as name:
     shape = tensor_util.shape_tensor(shape)
     if dtype.is_integer and minval is None:
-      result = gen_stateless_random_ops.stateless_random_uniform_full_int(
-          shape, seed=seed, dtype=dtype, name=name)
+      key, counter, alg = _get_key_counter_alg(seed, alg)
+      result = (
+          gen_stateless_random_ops_v2.stateless_random_uniform_full_int_v2(
+              shape, key=key, counter=counter, dtype=dtype, alg=alg, name=name))
     else:
       minval = ops.convert_to_tensor(minval, dtype=dtype, name="min")
       maxval = ops.convert_to_tensor(maxval, dtype=dtype, name="max")
       if dtype.is_integer:
-        result = gen_stateless_random_ops.stateless_random_uniform_int(
-            shape, seed=seed, minval=minval, maxval=maxval, name=name)
+        key, counter, alg = _get_key_counter_alg(seed, alg)
+        result = gen_stateless_random_ops_v2.stateless_random_uniform_int_v2(
+            shape,
+            key=key,
+            counter=counter,
+            minval=minval,
+            maxval=maxval,
+            alg=alg,
+            name=name)
       else:
-        rnd = gen_stateless_random_ops.stateless_random_uniform(
-            shape, seed=seed, dtype=dtype)
+        key, counter, alg = _get_key_counter_alg(seed, alg)
+        rnd = gen_stateless_random_ops_v2.stateless_random_uniform_v2(
+            shape, key=key, counter=counter, dtype=dtype, alg=alg)
         result = math_ops.add(rnd * (maxval - minval), minval, name=name)
     tensor_util.maybe_set_static_shape(result, shape)
     return result
@@ -917,12 +924,9 @@ def deterministic_random_normal(shape,
     shape = tensor_util.shape_tensor(shape)
     mean = ops.convert_to_tensor(mean, dtype=dtype, name="mean")
     stddev = ops.convert_to_tensor(stddev, dtype=dtype, name="stddev")
-    if compat.forward_compatible(2021, 3, 1):
-      key, counter, alg = _get_key_counter_alg(seed)
-      rnd = gen_stateless_random_ops_v2.stateless_random_normal_v2(
-          shape, key=key, counter=counter, dtype=dtype, alg=alg)
-    else:
-      rnd = gen_stateless_random_ops.stateless_random_normal(shape, seed, dtype)
+    key, counter, alg = _get_key_counter_alg(seed, alg)
+    rnd = gen_stateless_random_ops_v2.stateless_random_normal_v2(
+        shape, key=key, counter=counter, dtype=dtype, alg=alg)
     result = math_ops.add(rnd * stddev, mean, name=name)
     tensor_util.maybe_set_static_shape(result, shape)
     return result
@@ -1006,18 +1010,17 @@ def deterministic_truncated_normal(shape,
     A tensor of the specified shape filled with random truncated normal values.
   """
   seed = ops.get_default_graph().seed
+
+  ops.get_default_graph().seed = split(seed,num=1)[0,:]
+
   with ops.name_scope(name, "stateless_truncated_normal",
                       [shape, seed, mean, stddev]) as name:
     shape = tensor_util.shape_tensor(shape)
     mean = ops.convert_to_tensor(mean, dtype=dtype, name="mean")
     stddev = ops.convert_to_tensor(stddev, dtype=dtype, name="stddev")
-    if compat.forward_compatible(2020, 10, 25):
-      key, counter, alg = _get_key_counter_alg(seed)
-      rnd = gen_stateless_random_ops_v2.stateless_truncated_normal_v2(
-          shape, key=key, counter=counter, dtype=dtype, alg=alg)
-    else:
-      rnd = gen_stateless_random_ops.stateless_truncated_normal(
-          shape, seed, dtype)
+    key, counter, alg = _get_key_counter_alg(seed, alg)
+    rnd = gen_stateless_random_ops_v2.stateless_truncated_normal_v2(
+        shape, key=key, counter=counter, dtype=dtype, alg=alg)
     result = math_ops.add(rnd * stddev, mean, name=name)
     tensor_util.maybe_set_static_shape(result, shape)
     return result
