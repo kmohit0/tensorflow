@@ -61,13 +61,14 @@ constexpr char kBatchResults[] = "batch_results";
 constexpr char kEndOfInput[] = "end_of_input";
 constexpr char kNumElements[] = "num_elements";
 constexpr char kCallFinished[] = "call_finished";
+constexpr char kOutputAllocated[] = "output_allocated";
 constexpr char kStatus[] = "status";
 
 }  // namespace
 
 class ParallelBatchDatasetOp::Dataset : public DatasetBase {
  public:
-  Dataset(OpKernelContext* ctx, int64 batch_size, int64 num_parallel_calls,
+  Dataset(OpKernelContext* ctx, int64_t batch_size, int64_t num_parallel_calls,
           bool drop_remainder, bool parallel_copy, const DatasetBase* input,
           DeterminismPolicy deterministic)
       : DatasetBase(DatasetContext(ctx)),
@@ -128,7 +129,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
   }
 
   int64 Cardinality() const override {
-    int64 n = input_->Cardinality();
+    int64_t n = input_->Cardinality();
     if (n == kInfiniteCardinality || n == kUnknownCardinality) {
       return n;
     }
@@ -246,7 +247,9 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
       auto cleanup =
           gtl::MakeCleanup([result]() TF_EXCLUSIVE_LOCKS_REQUIRED(
                                &BatchResult::mu) { result->output.clear(); });
-      RecordBufferDequeue(ctx, result->output);
+      if (result->output_allocated) {
+        RecordBufferDequeue(ctx, result->output);
+      }
       TF_RETURN_IF_ERROR(
           ProcessBatch(dataset()->batch_size_, result->num_elements,
                        dataset()->drop_remainder_, result->status, ctx,
@@ -285,7 +288,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
                            IteratorStateReader* reader) override {
       mutex_lock l(*mu_);
       TF_RETURN_IF_ERROR(RestoreInput(ctx, reader, input_impl_));
-      int64 batch_results_size;
+      int64_t batch_results_size;
       TF_RETURN_IF_ERROR(reader->ReadScalar(full_name(kBatchResultsSize),
                                             &batch_results_size));
       DCHECK(batch_results_.empty());
@@ -296,7 +299,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
     }
 
     TraceMeMetadata GetTraceMeMetadata() const override {
-      int64 parallelism = -1;
+      int64_t parallelism = -1;
       // NOTE: We only set the parallelism value if the lock can be acquired
       // right away to avoid introducing tracing overhead.
       if (mu_->try_lock()) {
@@ -321,6 +324,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
             num_elements(0),
             status(Status::OK()),
             call_finished(false),
+            output_allocated(false),
             uid(tensorflow::EnvTime::NowNanos()) {}
 
       mutex mu;
@@ -329,6 +333,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
       std::vector<Tensor> output TF_GUARDED_BY(mu);
       Status status TF_GUARDED_BY(mu);
       bool call_finished TF_GUARDED_BY(&Iterator::mu_);
+      bool output_allocated TF_GUARDED_BY(mu);
       const int64 uid = -1;
     };
 
@@ -392,10 +397,17 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
         Status status;
         {
           mutex_lock l(result->mu);
-          status = CopyBatch(dataset()->parallel_copy_, ctx.get(),
-                             *batch_elements, &result->output);
+          auto allocation_callback =
+              [this, ctx, result]()
+                  TF_EXCLUSIVE_LOCKS_REQUIRED(&BatchResult::mu) {
+                    result->output_allocated = true;
+                    RecordBufferEnqueue(ctx.get(), result->output);
+                    return Status::OK();
+                  };
+          status =
+              CopyBatch(ctx.get(), *batch_elements, dataset()->parallel_copy_,
+                        std::move(allocation_callback), &result->output);
           result->status.Update(status);
-          RecordBufferEnqueue(ctx.get(), result->output);
         }
         CallCompleted(ctx, result);
         return status;
@@ -436,7 +448,7 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
         new_calls.reserve(num_parallel_calls_->value);
       }
       auto busy = [this]() TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) -> bool {
-        int64 num_parallel_calls = num_parallel_calls_->value;
+        int64_t num_parallel_calls = num_parallel_calls_->value;
         return num_calls_ >= num_parallel_calls ||
                batch_results_.size() >= num_parallel_calls;
       };
@@ -518,13 +530,17 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
           &result->num_elements));
       result->call_finished = reader->Contains(
           full_name(strings::StrCat(batch_prefix, "_", kCallFinished)));
+      result->output_allocated = reader->Contains(
+          full_name(strings::StrCat(batch_prefix, "_", kOutputAllocated)));
 
       TF_RETURN_IF_ERROR(ReadBatch(ctx, reader, dataset()->batch_size_,
                                    prefix(), batch_prefix, &result->output));
       TF_RETURN_IF_ERROR(ReadStatus(prefix(),
                                     strings::StrCat(batch_prefix, "_", kStatus),
                                     reader, &result->status));
-      RecordBufferEnqueue(ctx, result->output);
+      if (result->output_allocated) {
+        RecordBufferEnqueue(ctx, result->output);
+      }
       return Status::OK();
     }
 
@@ -543,6 +559,11 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
       if (result->call_finished) {
         TF_RETURN_IF_ERROR(writer->WriteScalar(
             full_name(strings::StrCat(batch_prefix, "_", kCallFinished)), ""));
+      }
+      if (result->output_allocated) {
+        TF_RETURN_IF_ERROR(writer->WriteScalar(
+            full_name(strings::StrCat(batch_prefix, "_", kOutputAllocated)),
+            ""));
       }
 
       TF_RETURN_IF_ERROR(WriteBatch(dataset()->batch_size_,
@@ -572,7 +593,12 @@ class ParallelBatchDatasetOp::Dataset : public DatasetBase {
     // Counts the number of outstanding calls for this batch.
     int64 num_calls_ TF_GUARDED_BY(*mu_) = 0;
     std::unique_ptr<IteratorBase> input_impl_;
-    // Buffer for storing the (intermediate) batch results.
+    // Buffer for storing the (intermediate) batch results. Whenever a non-empty
+    // batch result is added to or removed from `batch_results_`, call
+    // `RecordBufferEnqueue` or `RecordBufferDequeue` respectively.
+    //
+    // TODO(xiaojies): improve the accuracy of the condition used for
+    // determining when to record allocated bytes.
     std::deque<std::shared_ptr<BatchResult>> batch_results_ TF_GUARDED_BY(*mu_);
     // Background thread used for coordinating input processing.
     std::unique_ptr<Thread> runner_thread_ TF_GUARDED_BY(*mu_);
@@ -610,12 +636,12 @@ ParallelBatchDatasetOp::ParallelBatchDatasetOp(OpKernelConstruction* ctx)
 void ParallelBatchDatasetOp::MakeDataset(OpKernelContext* ctx,
                                          DatasetBase* input,
                                          DatasetBase** output) {
-  int64 batch_size = 0;
+  int64_t batch_size = 0;
   OP_REQUIRES_OK(ctx, ParseScalarArgument<int64>(ctx, kBatchSize, &batch_size));
   OP_REQUIRES(ctx, batch_size > 0,
               errors::InvalidArgument("Batch size must be greater than zero."));
 
-  int64 num_parallel_calls = 0;
+  int64_t num_parallel_calls = 0;
   OP_REQUIRES_OK(ctx, ParseScalarArgument<int64>(ctx, kNumParallelCalls,
                                                  &num_parallel_calls));
 

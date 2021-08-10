@@ -44,7 +44,7 @@ namespace transforms {
 namespace {
 
 constexpr StringRef kTfWrapperLibaryLaunchHelperName =
-    "tfKernelGenLaunchKernel";
+    "_mlir_ciface_tf_launch_kernel";
 
 #define GEN_PASS_CLASSES
 #include "tensorflow/compiler/mlir/tools/kernel_gen/transforms/kernel_gen_passes.h.inc"
@@ -224,7 +224,7 @@ LogicalResult ConvertLaunchFuncOpToTfRuntimeCallPattern::matchAndRewrite(
         loc, kTfWrapperLibaryLaunchHelperName, function_type);
   }
   rewriter.create<LLVM::CallOp>(
-      loc, llvm_void_type_, rewriter.getSymbolRefAttr(function),
+      loc, TypeRange(), rewriter.getSymbolRefAttr(function),
       ArrayRef<Value>{
           context_arg, module_blob, kernel_name_global, adaptor.gridSizeX(),
           adaptor.gridSizeY(), adaptor.gridSizeZ(), adaptor.blockSizeX(),
@@ -278,7 +278,7 @@ class TFKernelToLLVMPass : public TFKernelToLLVMPassBase<TFKernelToLLVMPass> {
     target.addIllegalDialect<StandardOpsDialect, complex::ComplexDialect,
                              gpu::GPUDialect, tf_framework::TFFrameworkDialect,
                              math::MathDialect>();
-    target.addIllegalOp<LLVM::DialectCastOp>();
+    target.addIllegalOp<UnrealizedConversionCastOp>();
     // Mark modules as legal.
     target.addLegalOp<ModuleOp, gpu::GPUModuleOp>();
     // Do not look into gpu modules, only consider host-side.

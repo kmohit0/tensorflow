@@ -23,8 +23,8 @@ import warnings
 
 import six
 
-from tensorflow.python.data.experimental.ops import distribute_options
 from tensorflow.python.data.ops import optional_ops
+from tensorflow.python.data.ops import options as options_lib
 from tensorflow.python.data.util import nest
 from tensorflow.python.data.util import structure
 from tensorflow.python.eager import context
@@ -38,6 +38,7 @@ from tensorflow.python.framework import type_spec
 from tensorflow.python.ops import gen_dataset_ops
 from tensorflow.python.training.saver import BaseSaverBuilder
 from tensorflow.python.training.tracking import base as trackable
+from tensorflow.python.util import _pywrap_utils
 from tensorflow.python.util import deprecation
 from tensorflow.python.util import lazy_loader
 from tensorflow.python.util.compat import collections_abc
@@ -749,7 +750,7 @@ class OwnedIterator(IteratorBase):
   def _next_internal(self):
     autograph_status = autograph_ctx.control_status_ctx().status
     autograph_disabled = autograph_status == autograph_ctx.Status.DISABLED
-    if ops.get_default_graph().building_function and autograph_disabled:
+    if not context.executing_eagerly() and autograph_disabled:
       self._get_next_call_count += 1
       if self._get_next_call_count > GET_NEXT_CALL_ERROR_THRESHOLD:
         raise ValueError(GET_NEXT_CALL_ERROR_MESSAGE)
@@ -930,7 +931,7 @@ class _IteratorSaveable(BaseSaverBuilder.SaveableObject):
       self,
       iterator_resource,
       name,
-      external_state_policy=distribute_options.ExternalStatePolicy.FAIL):
+      external_state_policy=options_lib.ExternalStatePolicy.FAIL):
     serialized_iterator = gen_dataset_ops.serialize_iterator(
         iterator_resource, external_state_policy=external_state_policy.value)
     specs = [
@@ -964,3 +965,6 @@ def get_next_as_optional(iterator):
     of the iterator (if it exists) or no value.
   """
   return iterator.get_next_as_optional()
+
+
+_pywrap_utils.RegisterType("OwnedIterator", OwnedIterator)

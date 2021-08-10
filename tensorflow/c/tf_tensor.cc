@@ -182,7 +182,17 @@ void TF_TensorBitcastFrom(const TF_Tensor* from, TF_DataType type,
 
 namespace tensorflow {
 
-void TensorInterface::Release() { delete this; }
+void TensorInterface::Release() {
+  if (Type() == DT_STRING && NumElements() > 0) {
+    TF_TString* data = static_cast<TF_TString*>(Data());
+    if (CanMove() && data != nullptr) {
+      for (int64_t i = 0; i < NumElements(); ++i) {
+        TF_TString_Dealloc(&data[i]);
+      }
+    }
+  }
+  delete this;
+}
 
 bool TensorInterface::CanMove() const {
   // It is safe to move the Tensor if and only if we own the unique reference to
@@ -249,7 +259,7 @@ static void DeleteArray(void* data, size_t size, void* arg) {
 static TF_Tensor* EmptyTensor(TF_DataType dtype,
                               const tensorflow::TensorShape& shape) {
   static char empty;
-  tensorflow::int64 nelems = 1;
+  int64_t nelems = 1;
   std::vector<tensorflow::int64> dims;
   for (int i = 0; i < shape.dims(); ++i) {
     dims.push_back(shape.dim_size(i));

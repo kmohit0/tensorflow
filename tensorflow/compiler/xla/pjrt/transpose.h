@@ -27,6 +27,7 @@ limitations under the License.
 #define TENSORFLOW_COMPILER_XLA_PJRT_TRANSPOSE_H_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -66,17 +67,31 @@ class TransposePlan {
   // this code we expect at most 2 tiled dimensions on input and output.
   //
   // The input may have either a striding or a tiling but not both.
+  //
+  // num_threads: is the number of threads requested. The actual number of
+  //   threads used may be smaller if there isn't enough work per thread.
   struct Tiling {
     absl::Span<int64_t const> tiling;
   };
   struct Striding {
     absl::Span<int64_t const> strides_in_bytes;
   };
+  enum class Transformation {
+    // Apply no transformations to the data.
+    kNone = 0,
+
+    // Convert doubles into the ef57 extended precision pair-of-floats
+    // representation used on TPU.
+    kF64ToEf57 = 1,
+  };
+
   static StatusOr<std::unique_ptr<TransposePlan>> Create(
       size_t elem_size_in_bytes, absl::Span<int64_t const> dims,
       absl::Span<int64_t const> permutation,
       absl::variant<Tiling, Striding> input_layout = Tiling{},
-      Tiling output_tiling = Tiling{});
+      Tiling output_tiling = Tiling{},
+      Transformation transformation = Transformation::kNone,
+      int num_threads = 1);
 
   TransposePlan();
   ~TransposePlan();
@@ -86,7 +101,9 @@ class TransposePlan {
   // arrays must not overlap.
   // Currently there are no alignment requirements on either `a` or `b`. However
   // performance may be better if either or both are aligned.
-  void Execute(const void* a, void* b) const;
+  void Execute(const void* a, void* b,
+               const std::function<void(std::function<void(void)>)>&
+                   schedule_work = {}) const;
 
   // Returns a human-readable description of the plan.
   std::string ToString() const;
@@ -102,6 +119,9 @@ class TransposePlan {
   absl::Span<int64_t const> OutputDims() const { return original_b_dims_; }
 
   absl::Span<int64_t const> InputStrides() const { return original_a_strides_; }
+
+  // Returns the number of items of parallel work in the plan.
+  int Parallelism() const { return nodes_.size(); }
 
   struct Node;
 
@@ -130,14 +150,20 @@ class TransposePlan {
   // Performs plan initialization that cannot fail.
   void Initialize();
 
-  void BuildPlanNodes(absl::Span<int64_t const> inverse_permutation, int i,
-                      absl::InlinedVector<Node*, 1>& output_nodes);
+  void BuildPlanNodes(absl::Span<int64_t const> inverse_permutation,
+                      int thread_id, std::vector<Node>& output_nodes);
+
+  std::vector<int> ChooseParallelizationStrategy(
+      absl::Span<int64_t const> inverse_permutation);
 
   // The signature of ExecuteTyped uses char* pointers because we perform
   // address calculations with strides in bytes; the strides need not be
   // multiples of the element size.
-  template <typename T>
-  void ExecuteTyped(const char* a, char* b) const;
+  template <typename T, Transformation transformation>
+  void ExecuteTyped(const char* a, char* b, absl::Span<Node const> nodes) const;
+
+  // Number of threads requested.
+  int num_threads_requested_ = 1;
 
   // Size of each element in bytes.
   int64_t elem_size_in_bytes_;
@@ -183,16 +209,11 @@ class TransposePlan {
     bool tile_interior;
   };
   std::vector<Loop> loop_order_;
-
-  // Nodes of the plan, in no particular order. Holds ownership of the plan
-  // nodes.
-  // TODO(phawkins): pack nodes into a dense array to minimize the effects of
-  // pointer jumping.
-  std::vector<std::unique_ptr<Node>> nodes_;
+  std::vector<int> loop_parallelism_;
 
   // Root nodes of the plan, i.e., pointing to the outermost loops in the loop
-  // nest. A plan may have multiple root nodes.
-  absl::InlinedVector<Node*, 1> root_nodes_;
+  // nest. The outer vector is indexed on the thread ID.
+  absl::InlinedVector<std::vector<Node>, 1> nodes_;
 
   // Are the innermost (stride-1) dimensions the same dimension? This determines
   // whether the inner kernel is a transpose or a memcpy.
@@ -205,14 +226,29 @@ class TransposePlan {
   // cache blocking and need not be equal between input and output.
   int outer_block_elems_a_ = 4;
   int outer_block_elems_b_ = 4;
+
+  // Transformations to apply to the input before transposition.
+  // Currently the only supported transformation is EF57 conversion, which is
+  // a pair-of-floats extended precision representation used on TPU. We
+  // support fusing transformations with the transpose for two reasons:
+  // (a) it makes sense to fuse cheap computations with a memory-bandwidth
+  //     bound transformation, and
+  // (b) it allows us to support non-trivial striding.
+  Transformation transformation_;
+
+  // Size of the per-thread scratch buffer. 0 means "no scratch buffer required"
+  int64_t scratch_size_ = 0;
 };
 
-// An LRU cache for transpose plans. Not thread-safe.
 struct TransposePlanCacheKey;
 
 template <typename H>
 H AbslHashValue(H h, const TransposePlanCacheKey& key);
 
+// An LRU cache for transpose plans. Not thread-safe.
+// Transpose plans aren't cheap to build, but once computed for a particular set
+// of inputs can be cached and reused for arrays. TransposePlanCache implements
+// such a cache.
 class TransposePlanCache {
  public:
   explicit TransposePlanCache(int capacity);
@@ -229,7 +265,10 @@ class TransposePlanCache {
       absl::Span<int64_t const> permutation,
       absl::variant<TransposePlan::Tiling, TransposePlan::Striding>
           input_layout = TransposePlan::Tiling{},
-      TransposePlan::Tiling output_tiling = TransposePlan::Tiling{});
+      TransposePlan::Tiling output_tiling = TransposePlan::Tiling{},
+      TransposePlan::Transformation transformation =
+          TransposePlan::Transformation::kNone,
+      int num_threads = 1);
 
  private:
   LRUCache<TransposePlanCacheKey,

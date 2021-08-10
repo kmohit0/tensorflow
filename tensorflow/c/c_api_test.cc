@@ -232,14 +232,14 @@ TEST(CAPI, LibraryLoadFunctions) {
 }
 
 void TestEncodeDecode(int line, const std::vector<string>& data) {
-  const tensorflow::int64 n = data.size();
+  const int64_t n = data.size();
   Status status;
   for (const std::vector<tensorflow::int64>& dims :
        std::vector<std::vector<tensorflow::int64>>{
            {n}, {1, n}, {n, 1}, {n / 2, 2}}) {
     // Create C++ Tensor
     Tensor src(tensorflow::DT_STRING, TensorShape(dims));
-    for (tensorflow::int64 i = 0; i < src.NumElements(); ++i) {
+    for (int64_t i = 0; i < src.NumElements(); ++i) {
       src.flat<tstring>()(i) = data[i];
     }
     TF_Tensor* dst = TF_TensorFromTensor(src, &status);
@@ -249,7 +249,7 @@ void TestEncodeDecode(int line, const std::vector<string>& data) {
     Tensor output;
     ASSERT_EQ(Status::OK(), TF_TensorToTensor(dst, &output)) << line;
     ASSERT_EQ(src.NumElements(), output.NumElements()) << line;
-    for (tensorflow::int64 i = 0; i < src.NumElements(); ++i) {
+    for (int64_t i = 0; i < src.NumElements(); ++i) {
       ASSERT_EQ(data[i], output.flat<tstring>()(i)) << line;
     }
 
@@ -1421,7 +1421,7 @@ TEST(CAPI, SavedModel) {
 
   // Write {0, 1, 2, 3} as tensorflow::Example inputs.
   Tensor input(tensorflow::DT_STRING, TensorShape({4}));
-  for (tensorflow::int64 i = 0; i < input.NumElements(); ++i) {
+  for (int64_t i = 0; i < input.NumElements(); ++i) {
     tensorflow::Example example;
     auto* feature_map = example.mutable_features()->mutable_feature();
     (*feature_map)["x"].mutable_float_list()->add_value(i);
@@ -2619,6 +2619,33 @@ TEST(CAPI, MessageBufferConversion) {
 
   protobuf::util::MessageDifferencer differencer;
   EXPECT_TRUE(differencer.Compare(node_in, node_out));
+}
+
+TEST(CAPI, TestTensorNonScalarBytesAllocateDelete) {
+  const int batch_size = 4;
+  const int num_dims = 2;
+  int64_t* dims = new int64_t[num_dims];
+  int64_t num_elements = 1;
+  dims[0] = batch_size;
+  dims[1] = 1;
+  for (int64_t i = 0; i < num_dims; ++i) {
+    num_elements *= dims[i];
+  }
+  TF_Tensor* t = TF_AllocateTensor(TF_STRING, dims, num_dims,
+                                   sizeof(TF_TString) * num_elements);
+  delete[] dims;
+
+  TF_TString* data = static_cast<TF_TString*>(TF_TensorData(t));
+  for (int i = 0; i < batch_size; ++i) {
+    TF_TString_Init(&data[i]);
+    // The following input string length is large enough to make sure that
+    // copy to tstring in large mode.
+    std::string source =
+        "This is the " + std::to_string(i + 1) + "th. data element\n";
+    TF_TString_Copy(&data[i], source.c_str(), source.length());
+  }
+
+  TF_DeleteTensor(t);
 }
 
 }  // namespace

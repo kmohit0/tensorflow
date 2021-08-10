@@ -64,10 +64,10 @@ class TensorHandle : public ImmediateExecutionTensorHandle {
                tensorflow::DataType dtype, EagerContext* ctx);
 
 #if !defined(IS_MOBILE_PLATFORM)
-  TensorHandle(int64_t op_id, int32 output_num, const string& remote_task,
+  TensorHandle(int64_t op_id, int32_t output_num, const string& remote_task,
                tensorflow::DataType dtype, Device* device, EagerContext* ctx,
                const bool unknown_device);
-  TensorHandle(int64_t op_id, int32 output_num, tensorflow::DataType dtype,
+  TensorHandle(int64_t op_id, int32_t output_num, tensorflow::DataType dtype,
                Device* device, const bool is_ready, EagerContext* ctx);
 #endif  // IS_MOBILE_PLATFORM
 
@@ -106,14 +106,14 @@ class TensorHandle : public ImmediateExecutionTensorHandle {
   // ready until the shape is set. It controls the lifetime of the remote
   // tensor.
   static TensorHandle* CreateUnshapedRemoteHandle(
-      int64_t op_id, int32 output_num, const string& remote_task,
+      int64_t op_id, int32_t output_num, const string& remote_task,
       tensorflow::DataType dtype, Device* d, EagerContext* ctx,
       const bool unknown_device = false);
   // A lazy remote handle refers to a tensor on a remote worker. The lifetime of
   // the remote tensor is controlled by the remote worker, but not by the lazy
   // remote handle. Lazy handles are normally created on a default function
   // device.
-  static TensorHandle* CreateLazyRemoteHandle(int64_t op_id, int32 output_num,
+  static TensorHandle* CreateLazyRemoteHandle(int64_t op_id, int32_t output_num,
                                               tensorflow::DataType dtype,
                                               Device* d, const bool is_ready,
                                               EagerContext* ctx);
@@ -134,6 +134,12 @@ class TensorHandle : public ImmediateExecutionTensorHandle {
   AbstractTensorInterface* Resolve(Status* status) override;
 
   ImmediateExecutionTensorHandle* Copy() override;
+
+  // Subclasses may return True to instruct the string formatter
+  // to use SummarizeValue instead of the NumPy formatter.
+  bool PreferCustomSummarizer() const override {
+    return dtype == DT_VARIANT || dtype == DT_RESOURCE;
+  }
 
   // Return the Tensor from the default device.
   Status Tensor(const tensorflow::Tensor** t) const;

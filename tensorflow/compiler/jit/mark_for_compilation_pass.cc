@@ -636,7 +636,7 @@ StatusOr<bool> MarkForCompilationPassImpl::Initialize() {
 template <typename FnTy>
 StatusOr<bool> MarkForCompilationPassImpl::ForEachEdgeInPostOrder(FnTy fn) {
   bool changed = false;
-  for (int32 node : cycles_graph_.AllNodesInPostOrder()) {
+  for (int32_t node : cycles_graph_.AllNodesInPostOrder()) {
     Cluster* cluster_from = GetClusterForCyclesGraphNode(node);
     if (!cluster_from) {
       continue;
@@ -1701,10 +1701,11 @@ Status MarkForCompilation(
     if (n->attrs().Find(kXlaAlreadyClustered)) {
       return Status::OK();
     }
-    // Skip the pass if we found TPUExecute ops in the graph, which indicates
-    // the graph is produced by TPU TF-XLA bridge and doesn't require auto
-    // clustering.
-    if (n->type_string() == "TPUExecute") {
+    // Skip the pass if we found TPUExecute or TPUExecuteAndUpdateVariables ops
+    // in the graph, which indicates the graph is produced by TPU TF-XLA bridge
+    // and doesn't require auto clustering.
+    if (n->type_string() == "TPUExecute" ||
+        n->type_string() == "TPUExecuteAndUpdateVariables") {
       return Status::OK();
     }
   }
@@ -1717,7 +1718,7 @@ Status MarkForCompilation(
       .Run();
 }
 
-std::atomic<int64>* GetPointerToFuel(int64 initial_value) {
+std::atomic<int64>* GetPointerToFuel(int64_t initial_value) {
   static std::atomic<int64>* fuel = [&]() {
     std::atomic<int64>* fuel = new std::atomic<int64>;
     *fuel = initial_value;
@@ -2052,6 +2053,7 @@ absl::flat_hash_set<string> GetKnownXLAAllowlistOp() {
                                      "TensorScatterMin",
                                      "TensorScatterSub",
                                      "TensorScatterUpdate",
+                                     "ToBool",
                                      "TridiagonalSolve",
                                      "TruncatedNormal",
                                      "Unique",
@@ -2082,6 +2084,7 @@ absl::flat_hash_set<string> GetKnownXLAAllowlistOp() {
                                      "XlaReduceWindow",
                                      "XlaRemoveDynamicDimensionSize",
                                      "XlaReplicaId",
+                                     "XlaRngBitGenerator",
                                      "XlaScatter",
                                      "XlaSelectAndScatter",
                                      "XlaSelfAdjointEig",

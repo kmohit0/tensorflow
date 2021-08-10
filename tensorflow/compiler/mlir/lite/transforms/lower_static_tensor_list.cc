@@ -635,9 +635,6 @@ struct ConvertTensorListPushBack
 // returned. 2) If the requested size is larger than the input tensorlist's
 // size. We need to create an additional tensorlist with 'size - input_size'
 // elements, and append it to the end of the input tensorlist.
-// TODO(haoliang): We could simplify this transformation by rewriting to pure
-// tensorlist ops and a few non-tensorlist ops (such as `SliceOp`). By operating
-// only on variant types, we could save some ops involved in rewriting this op.
 struct ConvertTensorListResize
     : public OpConversionPattern<TF::TensorListResizeOp> {
   using OpConversionPattern::OpConversionPattern;
@@ -869,7 +866,6 @@ struct ConvertTensorListStack
 // we concatenate all those tensors along the first dimension.
 // The pattern will be rejected if either `element_shape` is not constant, or
 // the first dimension of `input` is not known.
-// TODO(b/184168136): Consider rewrite in tablegen.
 struct ConvertTensorListConcatV2
     : public TensorListOpConverterBase<TF::TensorListConcatV2Op> {
   using TensorListOpConverterBase<
@@ -1392,8 +1388,7 @@ void LowerStaticTensorListPass::runOnOperation() {
   };
 
   ConversionTarget target(*context);
-  target.addDynamicallyLegalDialect<TF::TensorFlowDialect>(
-      llvm::Optional<ConversionTarget::DynamicLegalityCallbackFn>(is_legal));
+  target.addDynamicallyLegalDialect<TF::TensorFlowDialect>(is_legal);
   target.addIllegalOp<TF::EmptyTensorListOp, TF::TensorListFromTensorOp,
                       TF::TensorListGetItemOp, TF::TensorListLengthOp,
                       TF::TensorListPushBackOp, TF::TensorListReserveOp,
@@ -1420,9 +1415,16 @@ void LowerStaticTensorListPass::runOnOperation() {
   patterns.insert<ConvertEmptyTensorList, ConvertTensorListReserve,
                   ConvertTensorListConcatV2>(context,
                                              allow_tensorlist_pass_through);
+  ModuleOp module = getOperation();
   if (!allow_tensorlist_pass_through) {
-    if (failed(applyPartialConversion(getOperation(), target,
-                                      std::move(patterns)))) {
+    if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
+      module.emitError(
+          "Lowering tensor list ops is failed. Please consider using Select TF "
+          "ops and disabling `_experimental_lower_tensor_list_ops` flag in the "
+          "TFLite converter object. For example, "
+          "converter.target_spec.supported_ops = "
+          "[tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]\\n "
+          "converter._experimental_lower_tensor_list_ops = False");
       signalPassFailure();
     }
   } else {
@@ -1431,8 +1433,7 @@ void LowerStaticTensorListPass::runOnOperation() {
     // a `StatusScopedDiagnosticHandler` here to capture diagnostics generated
     // within this pass.
     StatusScopedDiagnosticHandler handler(context);
-    if (failed(applyPartialConversion(getOperation(), target,
-                                      std::move(patterns)))) {
+    if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
       auto _ = handler.ConsumeStatus();
     }
   }

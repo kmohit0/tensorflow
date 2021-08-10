@@ -34,7 +34,10 @@ limitations under the License.
 #include "tensorflow/lite/util.h"
 
 using tflite::OpResolver;
+using tflite::jni::AreDimsDifferent;
 using tflite::jni::BufferErrorReporter;
+using tflite::jni::CastLongToPointer;
+using tflite::jni::ConvertJIntArrayToVector;
 using tflite::jni::ThrowException;
 using tflite_shims::FlatBufferModel;
 using tflite_shims::Interpreter;
@@ -43,55 +46,19 @@ using tflite_shims::InterpreterBuilder;
 namespace {
 
 Interpreter* convertLongToInterpreter(JNIEnv* env, jlong handle) {
-  if (handle == 0) {
-    ThrowException(env, tflite::jni::kIllegalArgumentException,
-                   "Internal error: Invalid handle to Interpreter.");
-    return nullptr;
-  }
-  return reinterpret_cast<Interpreter*>(handle);
+  return CastLongToPointer<Interpreter>(env, handle);
 }
 
 FlatBufferModel* convertLongToModel(JNIEnv* env, jlong handle) {
-  if (handle == 0) {
-    ThrowException(env, tflite::jni::kIllegalArgumentException,
-                   "Internal error: Invalid handle to model.");
-    return nullptr;
-  }
-  return reinterpret_cast<FlatBufferModel*>(handle);
+  return CastLongToPointer<FlatBufferModel>(env, handle);
 }
 
 BufferErrorReporter* convertLongToErrorReporter(JNIEnv* env, jlong handle) {
-  if (handle == 0) {
-    ThrowException(env, tflite::jni::kIllegalArgumentException,
-                   "Internal error: Invalid handle to ErrorReporter.");
-    return nullptr;
-  }
-  return reinterpret_cast<BufferErrorReporter*>(handle);
+  return CastLongToPointer<BufferErrorReporter>(env, handle);
 }
 
 TfLiteOpaqueDelegate* convertLongToDelegate(JNIEnv* env, jlong handle) {
-  if (handle == 0) {
-    ThrowException(env, tflite::jni::kIllegalArgumentException,
-                   "Internal error: Invalid handle to delegate.");
-    return nullptr;
-  }
-  return reinterpret_cast<TfLiteOpaqueDelegate*>(handle);
-}
-
-std::vector<int> convertJIntArrayToVector(JNIEnv* env, jintArray inputs) {
-  int size = static_cast<int>(env->GetArrayLength(inputs));
-  std::vector<int> outputs(size, 0);
-  jint* ptr = env->GetIntArrayElements(inputs, nullptr);
-  if (ptr == nullptr) {
-    ThrowException(env, tflite::jni::kIllegalArgumentException,
-                   "Array has empty dimensions.");
-    return {};
-  }
-  for (int i = 0; i < size; ++i) {
-    outputs[i] = ptr[i];
-  }
-  env->ReleaseIntArrayElements(inputs, ptr, JNI_ABORT);
-  return outputs;
+  return CastLongToPointer<TfLiteOpaqueDelegate>(env, handle);
 }
 
 int getDataType(TfLiteType data_type) {
@@ -127,31 +94,6 @@ void printDims(char* buffer, int max_size, int* dims, int num_dims) {
   }
 }
 
-// Checks whether there is any difference between dimensions of a tensor and a
-// given dimensions. Returns true if there is difference, else false.
-bool AreDimsDifferent(JNIEnv* env, TfLiteTensor* tensor, jintArray dims) {
-  int num_dims = static_cast<int>(env->GetArrayLength(dims));
-  jint* ptr = env->GetIntArrayElements(dims, nullptr);
-  if (ptr == nullptr) {
-    ThrowException(env, tflite::jni::kIllegalArgumentException,
-                   "Empty dimensions of input array.");
-    return true;
-  }
-  bool is_different = false;
-  if (tensor->dims->size != num_dims) {
-    is_different = true;
-  } else {
-    for (int i = 0; i < num_dims; ++i) {
-      if (ptr[i] != tensor->dims->data[i]) {
-        is_different = true;
-        break;
-      }
-    }
-  }
-  env->ReleaseIntArrayElements(dims, ptr, JNI_ABORT);
-  return is_different;
-}
-
 // TODO(yichengfan): evaluate the benefit to use tflite verifier.
 bool VerifyModel(const void* buf, size_t len) {
   flatbuffers::Verifier verifier(static_cast<const uint8_t*>(buf), len);
@@ -178,19 +120,20 @@ bool ValidateSubgraphIndex(JNIEnv* env, Interpreter* interpreter,
 // from either inputs or outputs.
 // Returns -1 if invalid names are passed.
 int GetTensorIndexForSignature(JNIEnv* env, jstring signature_tensor_name,
-                               jstring method_name, Interpreter* interpreter,
+                               jstring signature_key, Interpreter* interpreter,
                                bool is_input) {
   // Fetch name strings.
-  const char* method_name_ptr = env->GetStringUTFChars(method_name, nullptr);
+  const char* signature_key_ptr =
+      env->GetStringUTFChars(signature_key, nullptr);
   const char* signature_input_name_ptr =
       env->GetStringUTFChars(signature_tensor_name, nullptr);
   // Lookup if the input is valid.
   const auto& signature_list =
-      (is_input ? interpreter->signature_inputs(method_name_ptr)
-                : interpreter->signature_outputs(method_name_ptr));
+      (is_input ? interpreter->signature_inputs(signature_key_ptr)
+                : interpreter->signature_outputs(signature_key_ptr));
   const auto& tensor = signature_list.find(signature_input_name_ptr);
   // Release the memory before returning.
-  env->ReleaseStringUTFChars(method_name, method_name_ptr);
+  env->ReleaseStringUTFChars(signature_key, signature_key_ptr);
   env->ReleaseStringUTFChars(signature_tensor_name, signature_input_name_ptr);
   return tensor == signature_list.end() ? -1 : tensor->second;
 }
@@ -215,6 +158,19 @@ jobjectArray GetSignatureInputsOutputsList(
   return names;
 }
 #endif  // TFLITE_DISABLE_SELECT_JAVA_APIS
+
+// Verifies whether the model is a flatbuffer file.
+class JNIFlatBufferVerifier : public tflite::TfLiteVerifier {
+ public:
+  bool Verify(const char* data, int length,
+              tflite::ErrorReporter* reporter) override {
+    if (!VerifyModel(data, length)) {
+      reporter->Report("The model is not a valid Flatbuffer file");
+      return false;
+    }
+    return true;
+  }
+};
 
 }  // namespace
 
@@ -314,10 +270,10 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_hasUnresolvedFlexOp(
 }
 
 JNIEXPORT jobjectArray JNICALL
-Java_org_tensorflow_lite_NativeInterpreterWrapper_getSignatureDefNames(
+Java_org_tensorflow_lite_NativeInterpreterWrapper_getSignatureKeys(
     JNIEnv* env, jclass clazz, jlong handle) {
 #if TFLITE_DISABLE_SELECT_JAVA_APIS
-  TFLITE_LOG(tflite::TFLITE_LOG_WARNING, "Not supported: getSignatureDefNames");
+  TFLITE_LOG(tflite::TFLITE_LOG_WARNING, "Not supported: getSignatureKeys");
   return nullptr;
 #else
   Interpreter* interpreter = convertLongToInterpreter(env, handle);
@@ -326,23 +282,23 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getSignatureDefNames(
   if (string_class == nullptr) {
     ThrowException(env, tflite::jni::kUnsupportedOperationException,
                    "Internal error: Can not find java/lang/String class to get "
-                   "SignatureDef names.");
+                   "SignatureDef keys.");
     return nullptr;
   }
-  const auto& signature_defs = interpreter->signature_def_names();
-  jobjectArray names = static_cast<jobjectArray>(env->NewObjectArray(
-      signature_defs.size(), string_class, env->NewStringUTF("")));
-  for (int i = 0; i < signature_defs.size(); ++i) {
-    env->SetObjectArrayElement(names, i,
-                               env->NewStringUTF(signature_defs[i]->c_str()));
+  const auto& signature_keys = interpreter->signature_keys();
+  jobjectArray keys = static_cast<jobjectArray>(env->NewObjectArray(
+      signature_keys.size(), string_class, env->NewStringUTF("")));
+  for (int i = 0; i < signature_keys.size(); ++i) {
+    env->SetObjectArrayElement(keys, i,
+                               env->NewStringUTF(signature_keys[i]->c_str()));
   }
-  return names;
+  return keys;
 #endif  // TFLITE_DISABLE_SELECT_JAVA_APIS
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_org_tensorflow_lite_NativeInterpreterWrapper_getSignatureInputs(
-    JNIEnv* env, jclass clazz, jlong handle, jstring method_name) {
+    JNIEnv* env, jclass clazz, jlong handle, jstring signature_key) {
 #if TFLITE_DISABLE_SELECT_JAVA_APIS
   ThrowException(env, tflite::jni::kUnsupportedOperationException,
                  "Not supported: getSignatureInputs");
@@ -350,18 +306,19 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getSignatureInputs(
 #else
   Interpreter* interpreter = convertLongToInterpreter(env, handle);
   if (interpreter == nullptr) return nullptr;
-  const char* method_name_ptr = env->GetStringUTFChars(method_name, nullptr);
+  const char* signature_key_ptr =
+      env->GetStringUTFChars(signature_key, nullptr);
   const jobjectArray signature_inputs = GetSignatureInputsOutputsList(
-      interpreter->signature_inputs(method_name_ptr), env);
+      interpreter->signature_inputs(signature_key_ptr), env);
   // Release the memory before returning.
-  env->ReleaseStringUTFChars(method_name, method_name_ptr);
+  env->ReleaseStringUTFChars(signature_key, signature_key_ptr);
   return signature_inputs;
 #endif  // TFLITE_DISABLE_SELECT_JAVA_APIS
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_org_tensorflow_lite_NativeInterpreterWrapper_getSignatureOutputs(
-    JNIEnv* env, jclass clazz, jlong handle, jstring method_name) {
+    JNIEnv* env, jclass clazz, jlong handle, jstring signature_key) {
 #if TFLITE_DISABLE_SELECT_JAVA_APIS
   ThrowException(env, tflite::jni::kUnsupportedOperationException,
                  "Not supported: getSignatureOutputs");
@@ -369,18 +326,19 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getSignatureOutputs(
 #else
   Interpreter* interpreter = convertLongToInterpreter(env, handle);
   if (interpreter == nullptr) return nullptr;
-  const char* method_name_ptr = env->GetStringUTFChars(method_name, nullptr);
+  const char* signature_key_ptr =
+      env->GetStringUTFChars(signature_key, nullptr);
   const jobjectArray signature_outputs = GetSignatureInputsOutputsList(
-      interpreter->signature_outputs(method_name_ptr), env);
+      interpreter->signature_outputs(signature_key_ptr), env);
   // Release the memory before returning.
-  env->ReleaseStringUTFChars(method_name, method_name_ptr);
+  env->ReleaseStringUTFChars(signature_key, signature_key_ptr);
   return signature_outputs;
 #endif  // TFLITE_DISABLE_SELECT_JAVA_APIS
 }
 
 JNIEXPORT jint JNICALL
 Java_org_tensorflow_lite_NativeInterpreterWrapper_getSubgraphIndexFromSignature(
-    JNIEnv* env, jclass clazz, jlong handle, jstring method_name) {
+    JNIEnv* env, jclass clazz, jlong handle, jstring signature_key) {
 #if TFLITE_DISABLE_SELECT_JAVA_APIS
   ThrowException(env, tflite::jni::kUnsupportedOperationException,
                  "Not supported: getSubgraphIndexFromSignature");
@@ -388,12 +346,13 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getSubgraphIndexFromSignature(
 #else
   Interpreter* interpreter = convertLongToInterpreter(env, handle);
   if (interpreter == nullptr) return -1;
-  const char* method_name_ptr = env->GetStringUTFChars(method_name, nullptr);
+  const char* signature_key_ptr =
+      env->GetStringUTFChars(signature_key, nullptr);
 
   int32_t subgraph_idx =
-      interpreter->GetSubgraphIndexFromSignatureDefName(method_name_ptr);
+      interpreter->GetSubgraphIndexFromSignature(signature_key_ptr);
   // Release the memory before returning.
-  env->ReleaseStringUTFChars(method_name, method_name_ptr);
+  env->ReleaseStringUTFChars(signature_key, signature_key_ptr);
   return subgraph_idx;
 #endif  // TFLITE_DISABLE_SELECT_JAVA_APIS
 }
@@ -401,7 +360,7 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getSubgraphIndexFromSignature(
 JNIEXPORT jint JNICALL
 Java_org_tensorflow_lite_NativeInterpreterWrapper_getInputTensorIndexFromSignature(
     JNIEnv* env, jclass clazz, jlong handle, jstring signature_input_name,
-    jstring method_name) {
+    jstring signature_key) {
 #if TFLITE_DISABLE_SELECT_JAVA_APIS
   ThrowException(env, tflite::jni::kUnsupportedOperationException,
                  "Not supported: getInputTensorIndexFromSignature");
@@ -409,7 +368,7 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getInputTensorIndexFromSignatu
 #else
   Interpreter* interpreter = convertLongToInterpreter(env, handle);
   if (interpreter == nullptr) return -1;
-  return GetTensorIndexForSignature(env, signature_input_name, method_name,
+  return GetTensorIndexForSignature(env, signature_input_name, signature_key,
                                     interpreter, /*is_input=*/true);
 #endif  // TFLITE_DISABLE_SELECT_JAVA_APIS
 }
@@ -417,7 +376,7 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getInputTensorIndexFromSignatu
 JNIEXPORT jint JNICALL
 Java_org_tensorflow_lite_NativeInterpreterWrapper_getOutputTensorIndexFromSignature(
     JNIEnv* env, jclass clazz, jlong handle, jstring signature_output_name,
-    jstring method_name) {
+    jstring signature_key) {
 #if TFLITE_DISABLE_SELECT_JAVA_APIS
   ThrowException(env, tflite::jni::kUnsupportedOperationException,
                  "Not supported: getOutputTensorIndexFromSignature");
@@ -425,7 +384,7 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_getOutputTensorIndexFromSignat
 #else
   Interpreter* interpreter = convertLongToInterpreter(env, handle);
   if (interpreter == nullptr) return -1;
-  return GetTensorIndexForSignature(env, signature_output_name, method_name,
+  return GetTensorIndexForSignature(env, signature_output_name, signature_key,
                                     interpreter, /*is_input=*/false);
 #endif  // TFLITE_DISABLE_SELECT_JAVA_APIS
 }
@@ -633,19 +592,6 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_createErrorReporter(
   return reinterpret_cast<jlong>(error_reporter);
 }
 
-// Verifies whether the model is a flatbuffer file.
-class JNIFlatBufferVerifier : public tflite::TfLiteVerifier {
- public:
-  bool Verify(const char* data, int length,
-              tflite::ErrorReporter* reporter) override {
-    if (!VerifyModel(data, length)) {
-      reporter->Report("The model is not a valid Flatbuffer file");
-      return false;
-    }
-    return true;
-  }
-};
-
 JNIEXPORT jlong JNICALL
 Java_org_tensorflow_lite_NativeInterpreterWrapper_createModel(
     JNIEnv* env, jclass clazz, jstring model_file, jlong error_handle) {
@@ -826,10 +772,10 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_resizeInput(
       TfLiteStatus status;
       if (strict) {
         status = interpreter->ResizeInputTensorStrict(
-            tensor_idx, convertJIntArrayToVector(env, dims));
+            tensor_idx, ConvertJIntArrayToVector(env, dims));
       } else {
         status = interpreter->ResizeInputTensor(
-            tensor_idx, convertJIntArrayToVector(env, dims));
+            tensor_idx, ConvertJIntArrayToVector(env, dims));
       }
       if (status != kTfLiteOk) {
         ThrowException(env, tflite::jni::kIllegalArgumentException,
@@ -862,10 +808,10 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_resizeInput(
     TfLiteStatus status;
     if (strict) {
       status = subgraph->ResizeInputTensorStrict(
-          tensor_idx, convertJIntArrayToVector(env, dims));
+          tensor_idx, ConvertJIntArrayToVector(env, dims));
     } else {
       status = subgraph->ResizeInputTensor(tensor_idx,
-                                           convertJIntArrayToVector(env, dims));
+                                           ConvertJIntArrayToVector(env, dims));
     }
     if (status != kTfLiteOk) {
       ThrowException(env, tflite::jni::kIllegalArgumentException,
@@ -898,26 +844,6 @@ Java_org_tensorflow_lite_NativeInterpreterWrapper_applyDelegate(
   if (status != kTfLiteOk) {
     ThrowException(env, tflite::jni::kIllegalArgumentException,
                    "Internal error: Failed to apply delegate: %s",
-                   error_reporter->CachedErrorMessage());
-  }
-}
-
-JNIEXPORT void JNICALL
-Java_org_tensorflow_lite_NativeInterpreterWrapper_resetVariableTensors(
-    JNIEnv* env, jclass clazz, jlong interpreter_handle, jlong error_handle) {
-  if (!tflite::jni::CheckJniInitializedOrThrow(env)) return;
-
-  Interpreter* interpreter = convertLongToInterpreter(env, interpreter_handle);
-  if (interpreter == nullptr) return;
-
-  BufferErrorReporter* error_reporter =
-      convertLongToErrorReporter(env, error_handle);
-  if (error_reporter == nullptr) return;
-
-  TfLiteStatus status = interpreter->ResetVariableTensors();
-  if (status != kTfLiteOk) {
-    ThrowException(env, tflite::jni::kIllegalArgumentException,
-                   "Internal error: Failed to reset variable tensors: %s",
                    error_reporter->CachedErrorMessage());
   }
 }

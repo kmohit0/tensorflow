@@ -349,6 +349,7 @@ cc_library(
     copts = tflite_copts_warnings(),
     visibility = [
         "//tensorflow/lite:__subpackages__",
+        "@org_tensorflow_lite_support//tensorflow_lite_support:__subpackages__",
     ],
     deps = [
         "//tensorflow/lite/experimental/acceleration/configuration/c:delegate_plugin",
@@ -414,6 +415,18 @@ build_test(
 
 #------------------------------------------------------------------------------
 # JNI bindings (Java API and Java Tasks library)
+
+cc_library(
+    name = "jni_utils",
+    srcs = ["jni/jni_utils.cc"],
+    hdrs = ["jni/jni_utils.h"],
+    visibility = [
+        "//tensorflow/lite:__subpackages__",
+    ],
+    deps = [
+        "//tensorflow/lite/java/jni",
+    ],
+)
 
 # Contains code to initialize TFLite through JNI in the internal version.
 cc_library(

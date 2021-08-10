@@ -57,18 +57,21 @@ Status RunAllReduce(const NcclAllReduceConfig& config,
     void* recv_buffer =
         buffer_allocations.GetDeviceAddress(buffer.destination_buffer).opaque();
 
-    TF_ASSIGN_OR_RETURN(ncclDataType_t datatype,
-                        ToNcclDataType(config.config.operand_element_type[i]));
+    PrimitiveType element_type = config.config.operand_element_type[i];
+    TF_ASSIGN_OR_RETURN(auto dtype_and_multiplier,
+                        ToNcclDataTypeAndCountMultiplier(element_type));
+    ncclDataType_t dtype = dtype_and_multiplier.first;
+    int element_count = buffer.element_count * dtype_and_multiplier.second;
 
     VLOG(3) << absl::StreamFormat(
         "Calling ncclAllReduce(send_buffer=%p, recv_buffer=%p, count=%d, "
         "comm=%p, stream=%p)",
-        send_buffer, recv_buffer, buffer.element_count,
-        static_cast<const void*>(comm), cu_stream);
+        send_buffer, recv_buffer, element_count, static_cast<const void*>(comm),
+        cu_stream);
 
     XLA_CUDA_RETURN_IF_ERROR(ncclAllReduce(send_buffer, recv_buffer,
-                                           buffer.element_count, datatype,
-                                           reduce_op, comm, *cu_stream));
+                                           element_count, dtype, reduce_op,
+                                           comm, *cu_stream));
   }
   return XLA_CUDA_STATUS(ncclGroupEnd());
 #else   // XLA_ENABLE_XCCL
@@ -130,42 +133,6 @@ StatusOr<mlir::Operation*> FindReductionOp(mlir::Block& block) {
   return reduction_op;
 }
 
-absl::optional<ReductionKind> MatchAllReduceComputation(
-    mlir::Region& computation) {
-  mlir::Block& block = computation.front();
-  StatusOr<mlir::Operation*> reduction_op = FindReductionOp(block);
-  if (!reduction_op.ok()) return absl::nullopt;
-  StatusOr<HloOpcode> opcode = MhloToHloOpcode(*reduction_op);
-  if (!opcode.ok()) return absl::nullopt;
-  // Match the operation to a reduction kind. We can represent and/or of pred as
-  // min/max. This works because pred is stored as an 8-bit int of value 0 or 1.
-  PrimitiveType type =
-      TypeToShape(block.getArgument(0).getType()).element_type();
-  if (type == PRED) {
-    switch (opcode.ValueOrDie()) {
-      case HloOpcode::kAnd:
-        return ReductionKind::MIN;
-      case HloOpcode::kOr:
-        return ReductionKind::MAX;
-      default:
-        return absl::nullopt;
-    }
-  } else {
-    switch (opcode.ValueOrDie()) {
-      case HloOpcode::kAdd:
-        return ReductionKind::SUM;
-      case HloOpcode::kMultiply:
-        return ReductionKind::PRODUCT;
-      case HloOpcode::kMaximum:
-        return ReductionKind::MAX;
-      case HloOpcode::kMinimum:
-        return ReductionKind::MIN;
-      default:
-        return absl::nullopt;
-    }
-  }
-}
-
 }  // namespace
 
 namespace impl {
@@ -173,13 +140,14 @@ namespace impl {
 template <typename OpT>
 bool CanImplement(OpT op) {
   return absl::c_all_of(op.operands(), IsValidOperand) &&
-         MatchAllReduceComputation(op.computation()).has_value();
+         NcclAllReduceThunkBase::MatchAllReduceComputation(op.computation())
+             .has_value();
 }
 
 template <typename OpT>
 NcclAllReduceConfig GetNcclAllReduceConfig(OpT op) {
   absl::optional<ReductionKind> reduction_kind =
-      MatchAllReduceComputation(op.computation());
+      NcclAllReduceThunkBase::MatchAllReduceComputation(op.computation());
   CHECK(reduction_kind.has_value());
 
   NcclAllReduceConfig config;
@@ -201,6 +169,49 @@ CollectiveOpGroupMode GetGroupMode(OpT op) {
 }
 
 }  // namespace impl
+
+absl::optional<ReductionKind> NcclAllReduceThunkBase::MatchAllReduceComputation(
+    mlir::Region& computation) {
+  mlir::Block& block = computation.front();
+  StatusOr<mlir::Operation*> reduction_op = FindReductionOp(block);
+  if (!reduction_op.ok()) return absl::nullopt;
+  StatusOr<HloOpcode> opcode = MhloToHloOpcode(*reduction_op);
+  if (!opcode.ok()) return absl::nullopt;
+  // Match the operation to a reduction kind. We can represent and/or of pred as
+  // min/max. This works because pred is stored as an 8-bit int of value 0 or 1.
+  PrimitiveType type =
+      TypeToShape(block.getArgument(0).getType()).element_type();
+  if (type == PRED) {
+    switch (opcode.ValueOrDie()) {
+      case HloOpcode::kAnd:
+        return ReductionKind::MIN;
+      case HloOpcode::kOr:
+        return ReductionKind::MAX;
+      default:
+        return absl::nullopt;
+    }
+  } else if (primitive_util::IsComplexType(type)) {
+    // Only addition is supported for complex types.
+    if (*opcode == HloOpcode::kAdd) {
+      return ReductionKind::SUM;
+    } else {
+      return absl::nullopt;
+    }
+  } else {
+    switch (*opcode) {
+      case HloOpcode::kAdd:
+        return ReductionKind::SUM;
+      case HloOpcode::kMultiply:
+        return ReductionKind::PRODUCT;
+      case HloOpcode::kMaximum:
+        return ReductionKind::MAX;
+      case HloOpcode::kMinimum:
+        return ReductionKind::MIN;
+      default:
+        return absl::nullopt;
+    }
+  }
+}
 
 NcclAllReduceThunkBase::NcclAllReduceThunkBase(Thunk::Kind kind,
                                                ThunkInfo thunk_info,
@@ -362,16 +373,19 @@ Status NcclReduceScatterThunk::RunNcclCollective(const ExecuteParams& params,
         params.buffer_allocations->GetDeviceAddress(buffer.destination_buffer)
             .opaque();
 
-    TF_ASSIGN_OR_RETURN(ncclDataType_t datatype,
-                        ToNcclDataType(config_.config.operand_element_type[i]));
+    PrimitiveType element_type = config_.config.operand_element_type[i];
+    TF_ASSIGN_OR_RETURN(auto dtype_and_multiplier,
+                        ToNcclDataTypeAndCountMultiplier(element_type));
+    ncclDataType_t dtype = dtype_and_multiplier.first;
+    int element_count = buffer.element_count * dtype_and_multiplier.second;
 
     // buffer.element_count is the source buffers element count. For
     // ncclReduceScatter, we need the destination buffers element count.
-    TF_RET_CHECK(buffer.element_count % num_participants == 0)
+    TF_RET_CHECK(element_count % num_participants == 0)
         << "Source buffer was not an exact multiple of the number of "
            "participants.";
 
-    int64_t recv_count = buffer.element_count / num_participants;
+    int64_t recv_count = element_count / num_participants;
     VLOG(3) << absl::StreamFormat(
         "Calling ncclReduceScatter(send_buffer=%p, recv_buffer=%p, "
         "recvcount=%d, "
@@ -379,7 +393,7 @@ Status NcclReduceScatterThunk::RunNcclCollective(const ExecuteParams& params,
         send_buffer, recv_buffer, recv_count, static_cast<const void*>(comm),
         cu_stream);
     XLA_CUDA_RETURN_IF_ERROR(ncclReduceScatter(send_buffer, recv_buffer,
-                                               recv_count, datatype, reduce_op,
+                                               recv_count, dtype, reduce_op,
                                                comm, *cu_stream));
   }
   XLA_CUDA_RETURN_IF_ERROR(ncclGroupEnd());
