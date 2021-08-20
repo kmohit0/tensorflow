@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
+import sys
 
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
@@ -28,7 +29,9 @@ from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gen_random_ops
+from tensorflow.python.ops import gen_stateless_random_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import logging_ops
 from tensorflow.python.ops import stateless_random_ops
 
 # go/tf-wildcard-import
@@ -357,6 +360,41 @@ def random_shuffle(value, seed=None, name=None):
   seed1, seed2 = random_seed.get_seed(seed)
   return gen_random_ops.random_shuffle(
       value, seed=seed1, seed2=seed2, name=name)
+  
+@tf_export("random.deterministic_shuffle", v1=[])
+@dispatch.add_dispatch_support
+def deterministic_random_shuffle(value, seed=None, name=None):
+  """Randomly shuffles a tensor along its first dimension.
+
+  The tensor is shuffled along dimension 0, such that each `value[j]` is mapped
+  to one and only one `output[i]`. For example, a mapping that might occur for a
+  3x2 tensor is:
+
+  ```python
+  [[1, 2],       [[5, 6],
+    [3, 4],  ==>   [1, 2],
+    [5, 6]]        [3, 4]]
+  ```
+
+  Args:
+    value: A Tensor to be shuffled.
+    seed: A Python integer. Used to create a random seed for the distribution.
+      See
+      `tf.random.set_seed`
+      for behavior.
+    name: A name for the operation (optional).
+
+  Returns:
+    A tensor of same shape and type as `value`, shuffled along its first
+    dimension.
+  """
+
+  seed=ops.get_default_graph().seed
+  ops.get_default_graph().seed = stateless_random_ops.split(seed,num=1)[0,:]  
+  print('seed1 is: '.format(seed))
+ # logging_ops.print_v2('the tmp_seed is ',tmp_seeds,output_stream=sys.stdout)
+  return gen_stateless_random_ops.stateless_random_shuffle(
+      value, seed=seed, name=name)
 
 
 @tf_export("image.random_crop", v1=["image.random_crop", "random_crop"])

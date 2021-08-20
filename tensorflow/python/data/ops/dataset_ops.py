@@ -4365,11 +4365,11 @@ class DeterministicStructuredFunctionWrapper(object):
       #logging.info('ret without _should_pack {}'.format(ret))
       if _should_pack(ret):
         ret = tuple(ret)
-        logging.info('ret with _should_pack{}'.format(ret))
+      #  logging.info('ret with _should_pack{}'.format(ret))
 
       try:
         self._output_structure = structure.type_spec_from_value(ret)
-        logging.info('Output structure {}'.format(self._output_structure))
+       # logging.info('Output structure {}'.format(self._output_structure))
 
       except (ValueError, TypeError):
         six.reraise(
@@ -4384,8 +4384,8 @@ class DeterministicStructuredFunctionWrapper(object):
                       **defun_kwargs)
       def wrapped_fn(*args):
         ret = wrapper_helper(*args)
-        logging.info(ret)
-        logging.info('output structure to tensor list {}'.format(structure.to_tensor_list(self._output_structure, ret)))
+      #  logging.info(ret)
+      #  logging.info('output structure to tensor list {}'.format(structure.to_tensor_list(self._output_structure, ret)))
         return structure.to_tensor_list(self._output_structure, ret)
 
       return lambda: wrapped_fn

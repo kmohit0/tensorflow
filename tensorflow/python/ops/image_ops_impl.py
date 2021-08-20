@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import functools
 import numpy as np
+import sys
 
 from tensorflow.python.compat import compat
 from tensorflow.python.eager import def_function
@@ -41,6 +42,7 @@ from tensorflow.python.ops import sort_ops
 from tensorflow.python.ops import stateless_random_ops
 from tensorflow.python.ops import string_ops
 from tensorflow.python.ops import variables
+from tensorflow.python.ops import logging_ops
 from tensorflow.python.util import deprecation
 from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
@@ -4041,8 +4043,9 @@ def deterministic_sample_distorted_bounding_box(image_size,
     Provide as input to `tf.image.draw_bounding_boxes`.
   """
   seed=ops.get_default_graph().seed
-
+  #logging_ops.print_v2('the original seed is ',seed,output_stream=sys.stdout)
   ops.get_default_graph().seed = stateless_random_ops.split(seed,num=1)[0,:]
+  #logging_ops.print_v2('the split seed is ',ops.get_default_graph().seed,output_stream=sys.stdout)
   with ops.name_scope(name, 'stateless_sample_distorted_bounding_box'):
     return gen_image_ops.stateless_sample_distorted_bounding_box(
         image_size=image_size,

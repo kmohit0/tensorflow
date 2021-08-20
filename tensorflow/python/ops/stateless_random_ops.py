@@ -21,6 +21,7 @@ from __future__ import print_function
 import enum
 import numpy as np
 import six
+import sys
 
 from tensorflow.python.compat import compat
 from tensorflow.python.framework import constant_op
@@ -32,6 +33,7 @@ from tensorflow.python.ops import bitwise_ops
 from tensorflow.python.ops import gen_stateless_random_ops
 from tensorflow.python.ops import gen_stateless_random_ops_v2
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import logging_ops
 from tensorflow.python.util import deprecation
 from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
@@ -392,9 +394,9 @@ def deterministic_random_uniform(shape,
     maxval = 1
 
   seed=ops.get_default_graph().seed
-
+  #logging_ops.print_v2('the original seed is ',seed,output_stream=sys.stdout)
   ops.get_default_graph().seed = split(seed,num=1)[0,:]
-
+  #logging_ops.print_v2('the original seed is ',ops.get_default_graph().seed,output_stream=sys.stdout)
   with ops.name_scope(name, "stateless_random_uniform",
                       [shape, seed, minval, maxval]) as name:
     shape = tensor_util.shape_tensor(shape)
